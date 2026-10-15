@@ -1,0 +1,24 @@
+name: Backend - agrupamento de rotas
+
+on:
+  push:
+    branches: ["fix/agrupamentos-backend"]
+  pull_request:
+
+jobs:
+  testar-backend:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql+asyncpg://teste:teste@localhost:5432/teste
+      SECRET_KEY: chave-temporaria-apenas-para-testes
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Instalar Python e dependências do lock
+        run: |
+          uv python install 3.14
+          uv sync --frozen --dev
+      - name: Testar agrupamento
+        run: uv run --frozen pytest -q tests/test_agrupamento.py
+      - name: Verificar importação do servidor
+        run: uv run --frozen python -c "from app.main import app; print(app.title)"

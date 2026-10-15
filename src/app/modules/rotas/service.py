@@ -7,10 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError, NotFoundError
 from app.core.logging import get_logger
+from app.ml.agrupamento import AlunoPonto, agrupar_alunos
 from app.ml.roteirizacao import Ponto, calcular_custo, otimizar
 from app.models.aluno import Aluno
 from app.models.motorista import Motorista
-from app.models.rotas import Rota, RotaParada, StatusParada, StatusRota
+from app.models.rotas import Rota, RotaParada, RotaPontoParada, StatusParada, StatusRota
 from app.models.veiculo import Veiculo
 from app.modules.escola.service import EscolaService
 from app.modules.veiculos.schemas import StatusVeiculo
@@ -122,6 +123,26 @@ class RotaService:
             raise AppError(f"O motorista {motorista.nome} está inativo")
         return motorista
 
+    @staticmethod
+    def _montar_pontos(alunos: list[Aluno]) -> list[RotaPontoParada]:
+        """Sugere paradas compartilhadas sem alterar registros individuais."""
+        try:
+            grupos = agrupar_alunos(
+                [AlunoPonto(id=a.id, latitude=a.latitude, longitude=a.longitude) for a in alunos]
+            )
+        except ValueError as exc:
+            raise AppError(str(exc)) from exc
+
+        return [
+            RotaPontoParada(
+                ordem=indice,
+                latitude=grupo.latitude,
+                longitude=grupo.longitude,
+                aluno_ids=[str(aluno_id) for aluno_id in grupo.aluno_ids],
+            )
+            for indice, grupo in enumerate(grupos, start=1)
+        ]
+
     async def criar(self, dados: RotaCreate) -> Rota:
         alunos = await self._carregar_alunos(dados.aluno_ids)
         await self._validar_veiculo(dados.veiculo_id, len(alunos))
@@ -140,6 +161,7 @@ class RotaService:
             RotaParada(aluno_id=aluno.id, ordem=indice + 1)
             for indice, aluno in enumerate(alunos)
         ]
+        rota.pontos_parada = self._montar_pontos(alunos)
 
         self.db.add(rota)
         await self.db.commit()
@@ -171,6 +193,7 @@ class RotaService:
                 RotaParada(aluno_id=aluno.id, ordem=indice + 1)
                 for indice, aluno in enumerate(alunos)
             ]
+            rota.pontos_parada = self._montar_pontos(alunos)
             self._limpar_otimizacao(rota)
         elif dados.veiculo_id is not None:
             await self._validar_veiculo(dados.veiculo_id, len(rota.paradas))
@@ -189,38 +212,65 @@ class RotaService:
         rota.tempo_estimado_min = None
         rota.litros_estimados = None
         rota.custo_combustivel = None
+        rota.preco_combustivel = None
         rota.geometria = None
         rota.otimizada_em = None
 
     # -------------------------------------------------------------- otimização
 
+    async def reagrupar(self, rota_id: UUID) -> Rota:
+        """Regenera as paradas sugeridas de uma rota planejada, sem chamar o OSRM."""
+        rota = await self.obter(rota_id)
+        if rota.status not in EDITAVEIS:
+            raise AppError("Só é possível reagrupar rotas planejadas")
+        if not rota.paradas:
+            raise AppError("A rota não tem alunos para agrupar")
+        ordenadas = sorted(rota.paradas, key=lambda p: p.ordem)
+        rota.pontos_parada = self._montar_pontos([p.aluno for p in ordenadas])
+        self._limpar_otimizacao(rota)
+        self.db.add(rota)
+        await self.db.commit()
+        return await self._recarregar(rota.id)
+
     async def otimizar(self, rota_id: UUID) -> Rota:
         rota = await self.obter(rota_id)
-        if rota.status == StatusRota.CONCLUIDA:
-            raise AppError("Rota concluída não pode ser recalculada")
+        if rota.status not in {StatusRota.PLANEJADA, StatusRota.EM_ANDAMENTO}:
+            raise AppError("Só é possível calcular rotas planejadas ou em andamento")
         if not rota.paradas:
             raise AppError("A rota não tem alunos para calcular")
 
+        # Reconstrói agrupamentos para rotas legadas que ainda não os possuem.
+        if not rota.pontos_parada:
+            paradas_ordenadas = sorted(rota.paradas, key=lambda p: p.ordem)
+            rota.pontos_parada = self._montar_pontos([p.aluno for p in paradas_ordenadas])
+
         escola = await EscolaService(self.db).obter_configurada()
+        grupos = list(rota.pontos_parada)
 
-        # A escola é sempre o ponto de partida (ida) ou de chegada (volta, via roundtrip).
+        # O OSRM visita um ponto por grupo, e não um ponto por aluno.
         pontos = [Ponto(referencia="escola", latitude=escola.latitude, longitude=escola.longitude)]
-        pontos += [
+        pontos.extend(
             Ponto(
-                referencia=str(parada.id),
-                latitude=parada.aluno.latitude,
-                longitude=parada.aluno.longitude,
+                referencia=f"grupo:{indice}",
+                latitude=grupo.latitude,
+                longitude=grupo.longitude,
             )
-            for parada in rota.paradas
-        ]
-
+            for indice, grupo in enumerate(grupos)
+        )
         resultado = await otimizar(pontos, roundtrip=True)
 
-        # Reordena as paradas conforme a sequência devolvida, descontando a escola.
-        sequencia = [p for p in resultado.pontos if p.referencia != "escola"]
-        posicoes = {p.referencia: indice + 1 for indice, p in enumerate(sequencia)}
-        for parada in rota.paradas:
-            parada.ordem = posicoes.get(str(parada.id), parada.ordem)
+        sequencia = [p.referencia for p in resultado.pontos if p.referencia != "escola"]
+        posicoes = {referencia: indice + 1 for indice, referencia in enumerate(sequencia)}
+        paradas_por_aluno = {str(p.aluno_id): p for p in rota.paradas}
+        proxima_ordem_aluno = 1
+        for indice, grupo in sorted(
+            enumerate(grupos), key=lambda item: posicoes[f"grupo:{item[0]}"]
+        ):
+            grupo.ordem = posicoes[f"grupo:{indice}"]
+            for aluno_id in grupo.aluno_ids:
+                parada = paradas_por_aluno[aluno_id]
+                parada.ordem = proxima_ordem_aluno
+                proxima_ordem_aluno += 1
 
         veiculo = await self.db.get(Veiculo, rota.veiculo_id) if rota.veiculo_id else None
         litros, custo = calcular_custo(
@@ -255,15 +305,17 @@ class RotaService:
             raise AppError("Só é possível reordenar rotas com status planejada")
 
         atuais = {parada.id for parada in rota.paradas}
-        if atuais != set(parada_ids):
+        if len(parada_ids) != len(atuais) or atuais != set(parada_ids):
             raise AppError("A nova ordem precisa conter exatamente as paradas da rota")
 
         posicoes = {parada_id: indice + 1 for indice, parada_id in enumerate(parada_ids)}
         for parada in rota.paradas:
             parada.ordem = posicoes[parada.id]
 
-        # Ordem manual invalida a geometria calculada, mas mantemos os totais como referência.
-        rota.geometria = None
+        # A ordem manual redefine a sequência dos grupos e invalida as métricas.
+        ordenadas = sorted(rota.paradas, key=lambda p: p.ordem)
+        rota.pontos_parada = self._montar_pontos([p.aluno for p in ordenadas])
+        self._limpar_otimizacao(rota)
 
         self.db.add(rota)
         await self.db.commit()

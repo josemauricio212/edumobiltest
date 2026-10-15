@@ -7,6 +7,7 @@ from app.models.motorista import Motorista
 from app.models.rotas import (
     Rota,
     RotaParada,
+    RotaPontoParada,
     StatusParada,
     StatusRota,
     TipoRota,
@@ -24,6 +25,7 @@ __all__ = [
     "Motorista",
     "Rota",
     "RotaParada",
+    "RotaPontoParada",
     "StatusParada",
     "StatusRota",
     "TipoRota",
