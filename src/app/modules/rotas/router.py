@@ -74,6 +74,12 @@ async def atualizar(rota_id: UUID, dados: RotaUpdate, db: DbSession) -> RotaRead
     return RotaRead.model_validate(rota)
 
 
+@router.post("/{rota_id}/agrupar", response_model=RotaRead, dependencies=[pode_operar])
+async def reagrupar(rota_id: UUID, db: DbSession) -> RotaRead:
+    rota = await RotaService(db).reagrupar(rota_id)
+    return RotaRead.model_validate(rota)
+
+
 @router.post("/{rota_id}/otimizar", response_model=RotaRead, dependencies=[pode_operar])
 async def otimizar(rota_id: UUID, db: DbSession) -> RotaRead:
     rota = await RotaService(db).otimizar(rota_id)
