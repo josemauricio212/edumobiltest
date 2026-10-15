@@ -61,6 +61,18 @@ class ParadaRead(BaseModel):
     aluno: AlunoResumo
 
 
+class PontoParadaRead(BaseModel):
+    """Parada compartilhada. aluno_ids referencia os estudantes em paradas[].aluno.id."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    ordem: int
+    latitude: float
+    longitude: float
+    aluno_ids: list[UUID]
+
+
 class MotoristaResumo(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -106,7 +118,8 @@ class RotaRead(BaseModel):
     total_ausentes: int = 0
     # Pares [latitude, longitude] do trajeto calculado (vazio até otimizar).
     geometria: list[list[float]] = []
-    paradas: list[ParadaRead] = []
+    paradas: list[ParadaRead] = Field(default_factory=list)
+    pontos_parada: list[PontoParadaRead] = Field(default_factory=list)
 
     @field_validator("geometria", mode="before")
     @classmethod
