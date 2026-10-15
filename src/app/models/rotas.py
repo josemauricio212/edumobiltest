@@ -5,7 +5,7 @@ from datetime import UTC, date, datetime, time
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import Date, Enum, Float, ForeignKey, Integer, String, Text, Time
+from sqlalchemy import JSON, Date, Enum, Float, ForeignKey, Integer, String, Text, Time
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -112,6 +112,13 @@ class Rota(Base):
         lazy="selectin",
     )
 
+    pontos_parada: Mapped[list[RotaPontoParada]] = relationship(
+        back_populates="rota",
+        cascade="all, delete-orphan",
+        order_by="RotaPontoParada.ordem",
+        lazy="selectin",
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(UTC),
     )
@@ -175,3 +182,31 @@ class RotaParada(Base):
     created_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(UTC),
     )
+
+
+class RotaPontoParada(Base):
+    """Ponto de embarque compartilhado por um ou mais alunos da rota.
+
+    A associação é armazenada como lista de UUIDs em JSON para preservar a
+    tabela rota_paradas e evitar migração destrutiva nos embarques existentes.
+    """
+
+    __tablename__ = "rota_pontos_parada"
+
+    id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    rota_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("rotas.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    ordem: Mapped[int] = mapped_column(Integer, nullable=False)
+    latitude: Mapped[float] = mapped_column(Float, nullable=False)
+    longitude: Mapped[float] = mapped_column(Float, nullable=False)
+    aluno_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+
+    rota: Mapped[Rota] = relationship(back_populates="pontos_parada")
