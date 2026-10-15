@@ -218,6 +218,20 @@ class RotaService:
 
     # -------------------------------------------------------------- otimização
 
+    async def reagrupar(self, rota_id: UUID) -> Rota:
+        """Regenera as paradas sugeridas de uma rota planejada, sem chamar o OSRM."""
+        rota = await self.obter(rota_id)
+        if rota.status not in EDITAVEIS:
+            raise AppError("Só é possível reagrupar rotas planejadas")
+        if not rota.paradas:
+            raise AppError("A rota não tem alunos para agrupar")
+        ordenadas = sorted(rota.paradas, key=lambda p: p.ordem)
+        rota.pontos_parada = self._montar_pontos([p.aluno for p in ordenadas])
+        self._limpar_otimizacao(rota)
+        self.db.add(rota)
+        await self.db.commit()
+        return await self._recarregar(rota.id)
+
     async def otimizar(self, rota_id: UUID) -> Rota:
         rota = await self.obter(rota_id)
         if rota.status not in {StatusRota.PLANEJADA, StatusRota.EM_ANDAMENTO}:
